@@ -28,7 +28,10 @@ import (
 	"github.com/spf13/cobra"
 
 	tezos "github.com/ecadlabs/go-tezos"
+	. "github.com/logrusorgru/aurora"
 )
+
+var outputFormat string
 
 // blockCmd represents the block command
 var blockCmd = &cobra.Command{
@@ -38,12 +41,12 @@ var blockCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		for _, blockString := range args {
-			v, err := strconv.Atoi(blockString)
+			blockNo, err := strconv.Atoi(blockString)
 			if err != nil {
 				fmt.Println("Invalid block number:", blockString)
 				continue
 			}
-			blockPrint(v)
+			blockPrint(blockNo)
 		}
 	},
 }
@@ -59,7 +62,7 @@ func init() {
 
 	// Cobra supports local flags which will only run when this command
 	// is called directly, e.g.:
-	// blockCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+	blockCmd.Flags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, json]")
 }
 
 func blockPrint(blockNo int) {
@@ -70,11 +73,35 @@ func blockPrint(blockNo int) {
 	}
 	s := &tezos.Service{Client: c}
 
-	stats, err := s.GetNetworkStats(context.TODO())
+	block, err := s.GetBlock(context.TODO(), chainID, strconv.Itoa(blockNo))
+
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
-	fmt.Println(blockNo, stats)
+	switch outputFormat {
+	case "json":
+		fmt.Println(jsonifyWhatever(block))
+	case "text":
+		blockPrintText(block)
+	}
+}
+
+func blockPrintText(block *tezos.Block) {
+	c, err := tezos.NewRPCClient(nil, tezosURL)
+	if err != nil {
+		fmt.Println("Cannot connect to", tezosURL)
+		panic(err)
+	}
+	s := &tezos.Service{Client: c}
+	succBlock, err := s.GetBlock(context.TODO(), chainID, strconv.Itoa(int(block.Header.Level)+1))
+	var successor = "--"
+	if err == nil {
+		successor = succBlock.Hash
+	}
+
+	fmt.Println("Block:\t\t", BgGreen(block.Hash))
+	fmt.Println("Predecessor:\t", Blue(block.Header.Predecessor))
+	fmt.Println("Successor:\t", successor)
 }
