@@ -60,10 +60,7 @@ func init() {
 	// will be global for your application.
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.tezos-cli.yaml)")
 	rootCmd.PersistentFlags().StringVar(&tezosURL, "url", "http://localhost:8732/", "Tezor RPC end-point URL")
-
-	// Cobra also supports local flags, which will only run
-	// when this action is called directly.
-	rootCmd.Flags().StringVarP(&chainID, "chain", "c", "main", "Chain ID (default=main)")
+	rootCmd.PersistentFlags().StringVar(&chainID, "chain", "main", "Chain ID (default=main)")
 }
 
 // initConfig reads in config file and ENV variables if set.

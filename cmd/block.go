@@ -41,12 +41,12 @@ var blockCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		for _, blockString := range args {
-			blockNo, err := strconv.Atoi(blockString)
-			if err != nil {
-				fmt.Println("Invalid block number:", blockString)
-				continue
-			}
-			blockPrint(blockNo)
+			blockPrint(blockString)
+			/*
+				for i := 8000; i < 18000; i++ {
+					blockPrint(strconv.Itoa(i))
+				}
+			*/
 		}
 	},
 }
@@ -65,7 +65,7 @@ func init() {
 	blockCmd.Flags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, json]")
 }
 
-func blockPrint(blockNo int) {
+func blockPrint(blockString string) {
 	c, err := tezos.NewRPCClient(nil, tezosURL)
 	if err != nil {
 		fmt.Println("Cannot connect to", tezosURL)
@@ -73,7 +73,7 @@ func blockPrint(blockNo int) {
 	}
 	s := &tezos.Service{Client: c}
 
-	block, err := s.GetBlock(context.TODO(), chainID, strconv.Itoa(blockNo))
+	block, err := s.GetBlock(context.TODO(), chainID, blockString)
 
 	if err != nil {
 		fmt.Println(err)
@@ -100,8 +100,30 @@ func blockPrintText(block *tezos.Block) {
 	if err == nil {
 		successor = succBlock.Hash
 	}
-
 	fmt.Println("Block:\t\t", BgGreen(block.Hash))
 	fmt.Println("Predecessor:\t", Blue(block.Header.Predecessor))
 	fmt.Println("Successor:\t", successor)
+	fmt.Println("Level:\t\t", block.Header.Level)
+	fmt.Println()
+	fmt.Println("Timestamp:", block.Header.Timestamp, "\t\tNonce hash:", block.Metadata.NonceHash)
+
+	volume := int64(0)
+	fees := int64(0)
+	for _, ol := range block.Operations {
+		for _, o := range ol {
+			for _, c := range o.Contents {
+				if c.OperationElemKind() != "transaction" {
+					continue
+				}
+				//fmt.Println(block.Header.Level, jsonifyWhatever(c))
+				t := c.(*tezos.TransactionOperationElem)
+
+				fees += t.Fee.Int64()
+				volume += t.Amount.Int64()
+			}
+		}
+	}
+
+	fmt.Println("Volume:\t", Green(volume), "\t\tFees:", fees)
+
 }
