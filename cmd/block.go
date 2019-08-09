@@ -33,44 +33,31 @@ import (
 
 var outputFormat string
 
-// blockCmd represents the block command
-var blockCmd = &cobra.Command{
-	Use:   "block",
-	Short: "Inspects blocks",
-	Long:  `This command supports inspecting blocks.`,
-	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
-		for _, blockString := range args {
-			blockPrint(blockString)
-			/*
-				for i := 8000; i < 18000; i++ {
-					blockPrint(strconv.Itoa(i))
-				}
-			*/
-		}
-	},
-}
+// NewBlockCommand returns a cobra command for interacting with blocks
+func NewBlockCommand(client *tezos.RPCClient, chainID string) *cobra.Command {
 
-func init() {
-	rootCmd.AddCommand(blockCmd)
-
-	// Here you will define your flags and configuration settings.
-
-	// Cobra supports Persistent Flags which will work for this command
-	// and all subcommands, e.g.:
-	// blockCmd.PersistentFlags().String("foo", "", "A help for foo")
-
-	// Cobra supports local flags which will only run when this command
-	// is called directly, e.g.:
-	blockCmd.Flags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, json]")
-}
-
-func blockPrint(blockString string) {
-	c, err := tezos.NewRPCClient(nil, tezosURL)
-	if err != nil {
-		fmt.Println("Cannot connect to", tezosURL)
-		panic(err)
+	blockCmd := &cobra.Command{
+		Use:   "block",
+		Short: "Inspects blocks",
+		Long:  `This command supports inspecting blocks.`,
+		Args:  cobra.MinimumNArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			for _, blockString := range args {
+				blockPrint(client, blockString, chainID)
+				/*
+					for i := 8000; i < 18000; i++ {
+						blockPrint(strconv.Itoa(i))
+					}
+				*/
+			}
+		},
 	}
+
+	blockCmd.Flags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, json]")
+	return blockCmd
+}
+
+func blockPrint(c *tezos.RPCClient, blockString, chainID string) {
 	s := &tezos.Service{Client: c}
 
 	block, err := s.GetBlock(context.TODO(), chainID, blockString)
@@ -84,16 +71,11 @@ func blockPrint(blockString string) {
 	case "json":
 		fmt.Println(jsonifyWhatever(block))
 	case "text":
-		blockPrintText(block)
+		blockPrintText(c, block, chainID)
 	}
 }
 
-func blockPrintText(block *tezos.Block) {
-	c, err := tezos.NewRPCClient(nil, tezosURL)
-	if err != nil {
-		fmt.Println("Cannot connect to", tezosURL)
-		panic(err)
-	}
+func blockPrintText(c *tezos.RPCClient, block *tezos.Block, chainID string) {
 	s := &tezos.Service{Client: c}
 	succBlock, err := s.GetBlock(context.TODO(), chainID, strconv.Itoa(int(block.Header.Level)+1))
 	var successor = "--"
@@ -125,5 +107,4 @@ func blockPrintText(block *tezos.Block) {
 	}
 
 	fmt.Println("Volume:\t", Green(volume), "\t\tFees:", fees)
-
 }
