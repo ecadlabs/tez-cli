@@ -6,15 +6,17 @@ The `tez` program is a command line interface (CLI) for interacting with the Tez
 
 ## Goals (not necessarily implemented yet!)
 
-* Easy to install on any popular operating system (binaries for all OS, packages for most, and docker images)
+* Easy to install on any popular operating system (binaries for all OS, packages for many (rpm, deb, snaps) and docker images)
 * A joy to use, makes use of the "sub-command" cli pattern that we have come familiar with (thanks git, docker, etal.)
 * Ships with command completions for bash, zsh and powershell
 * Easily create and manage tezos "contexts" allowing the user to store settings for mainnet, alphanet and privatenets (for testing/dev)
-* Support transactions such as;
+* Easy to script with (Outputs human friendly data by default, or json with `-o json`)
+* Support transactions such as
   * Managing delegations
   * Transferring tokens
   * Voting
   * Deploying smart contracts
+* Support for remote signers, and consumer HSM's (ledger)
 
 ## But there's already an official tezos-client
 
