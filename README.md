@@ -1,3 +1,5 @@
+[![CircleCI](https://circleci.com/gh/ecadlabs/tez.svg?style=svg)](https://circleci.com/gh/ecadlabs/tez)
+
 # An experimental tezos command line interface
 
 This is an experimental project.
