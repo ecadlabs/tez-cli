@@ -46,7 +46,7 @@ func main() {
 	cobra.OnInitialize(initConfig)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.tezos-cli.yaml)")
-	rootCmd.PersistentFlags().StringVar(&tezosURL, "url", "http://localhost:8732/", "Tezor RPC end-point URL")
+	rootCmd.PersistentFlags().StringVar(&tezosURL, "url", "https://rpc.tezrpc.me/", "Tezor RPC end-point URL")
 	rootCmd.PersistentFlags().StringVar(&chainID, "chain", "main", "Chain ID (default=main)")
 
 	if err := rootCmd.Execute(); err != nil {
