@@ -52,8 +52,11 @@ var blockCmd = &cobra.Command{
 	Use:   "block",
 	Short: "Inspects blocks",
 	Long:  `This command supports inspecting blocks.`,
-	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 {
+			args = []string{"head"}
+		}
+
 		if newOutputEncoder := utils.GetEncoderFunc(outputFormat); newOutputEncoder != nil {
 			return printEncoded(newOutputEncoder(os.Stdout), args)
 		}
