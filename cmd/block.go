@@ -42,34 +42,65 @@ Volume:{{"\t\t"}}{{printf "%-30d" .Volume | au.Green}}{{"\t"}}Fees:{{"\t"}}{{.Fe
 {{end}}
 `
 
-var (
-	outputFormat string
-	funcsMap     = template.FuncMap{"au": func() interface{} { return au }}
-	blockTpl     = template.Must(template.New("block").Funcs(funcsMap).Parse(blockTplText))
-)
-
-var blockCmd = &cobra.Command{
-	Use:   "block",
-	Short: "Inspects blocks",
-	Long:  `This command supports inspecting blocks.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if len(args) == 0 {
-			args = []string{"head"}
-		}
-
-		if newOutputEncoder := utils.GetEncoderFunc(outputFormat); newOutputEncoder != nil {
-			return printEncoded(newOutputEncoder(os.Stdout), args)
-		}
-		return printText(args)
-	},
+type BlockCommandContext struct {
+	*RootContext
+	NewEncoder      utils.NewEncoderFunc
+	TemplateFuncMap template.FuncMap
 }
 
-func printEncoded(enc utils.Encoder, args []string) error {
-	s := &tezos.Service{Client: tezosClient}
+func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
+	var (
+		outputFormat string
+		blockCmd     *cobra.Command // Forward declaration, see PersistentPreRunE below
+	)
+
+	ctx := BlockCommandContext{
+		RootContext: rootCtx,
+	}
+
+	blockCmd = &cobra.Command{
+		Use:   "block",
+		Short: "Blocks inspection",
+
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			// https://github.com/spf13/cobra/issues/216
+			// Also note that `cmd` always points to the top level command and not to ourselves
+			if err := blockCmd.Parent().PersistentPreRunE(cmd, args); err != nil {
+				return err
+			}
+
+			ctx.NewEncoder = utils.GetEncoderFunc(outputFormat)
+			ctx.TemplateFuncMap = template.FuncMap{"au": func() interface{} { return ctx.Colorizer }}
+
+			return nil
+		},
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				args = []string{"head"}
+			}
+
+			if ctx.NewEncoder != nil {
+				return ctx.printBlockEncoded(args)
+			}
+
+			return ctx.printBlockText(args)
+		},
+	}
+
+	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, yaml, json]")
+
+	return blockCmd
+}
+
+func (c *BlockCommandContext) printBlockEncoded(args []string) error {
+	enc := c.NewEncoder(os.Stdout)
+	s := &tezos.Service{Client: c.TezosClient}
+
 	blocks := make([]*tezos.Block, len(args))
 
 	for i, id := range args {
-		block, err := s.GetBlock(context.TODO(), chainID, id)
+		block, err := s.GetBlock(context.TODO(), c.ChainID, id)
 		if err != nil {
 			return err
 		}
@@ -79,8 +110,13 @@ func printEncoded(enc utils.Encoder, args []string) error {
 	return enc.Encode(blocks)
 }
 
-func printText(args []string) error {
-	s := &tezos.Service{Client: tezosClient}
+func (c *BlockCommandContext) printBlockText(args []string) error {
+	s := &tezos.Service{Client: c.TezosClient}
+
+	tpl, err := template.New("block").Funcs(c.TemplateFuncMap).Parse(blockTplText)
+	if err != nil {
+		return err
+	}
 
 	type blockTplData struct {
 		*tezos.Block
@@ -92,7 +128,7 @@ func printText(args []string) error {
 	tplData := make([]*blockTplData, len(args))
 
 	for i, id := range args {
-		block, err := s.GetBlock(context.TODO(), chainID, id)
+		block, err := s.GetBlock(context.TODO(), c.ChainID, id)
 		if err != nil {
 			return err
 		}
@@ -101,7 +137,7 @@ func printText(args []string) error {
 			Block: block,
 		}
 
-		t.Successor, _ = s.GetBlock(context.TODO(), chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+		t.Successor, _ = s.GetBlock(context.TODO(), c.ChainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
 
 		for _, ol := range block.Operations {
 			for _, o := range ol {
@@ -117,10 +153,5 @@ func printText(args []string) error {
 		tplData[i] = t
 	}
 
-	return blockTpl.Execute(os.Stdout, tplData)
-}
-
-func init() {
-	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, yaml, json]")
-	rootCmd.AddCommand(blockCmd)
+	return tpl.Execute(os.Stdout, tplData)
 }

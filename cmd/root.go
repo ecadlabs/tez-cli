@@ -28,35 +28,46 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var (
-	tezosURL    string
-	chainID     string
-	tezosClient *tezos.RPCClient
-	useColors   bool
-	au          aurora.Aurora
-)
-
-var rootCmd = &cobra.Command{
-	Use:   "tez",
-	Short: "An alternative CLI utility for Tezos",
-	Long:  `This utility allows you to inspect and manipulate a running Tezos instance`,
-	PersistentPreRunE: func(cmd *cobra.Command, args []string) (err error) {
-		au = aurora.NewAurora(useColors)
-		tezosClient, err = tezos.NewRPCClient(nil, tezosURL)
-		if err != nil {
-			err = fmt.Errorf("Failed to initilize tezos RPC client: %v", err)
-		}
-		return
-	},
+type RootContext struct {
+	TezosURL    string
+	ChainID     string
+	TezosClient *tezos.RPCClient
+	Colorizer   aurora.Aurora
 }
 
-func init() {
-	rootCmd.PersistentFlags().StringVar(&tezosURL, "url", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
-	rootCmd.PersistentFlags().StringVar(&chainID, "chain", "main", "Chain ID")
-	rootCmd.PersistentFlags().BoolVar(&useColors, "colors", true, "Use colors")
+func NewRootCommand() *cobra.Command {
+	var (
+		useColors bool
+		ctx       RootContext
+	)
+
+	rootCmd := &cobra.Command{
+		Use:   "tez",
+		Short: "An alternative CLI utility for Tezos",
+		Long:  `This utility allows you to inspect and manipulate a running Tezos instance`,
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) (err error) {
+			// cmd always points to the top level command!!!
+			ctx.Colorizer = aurora.NewAurora(useColors)
+			ctx.TezosClient, err = tezos.NewRPCClient(nil, ctx.TezosURL)
+			if err != nil {
+				err = fmt.Errorf("Failed to initilize tezos RPC client: %v", err)
+			}
+			return
+		},
+	}
+
+	f := rootCmd.PersistentFlags()
+
+	f.StringVar(&ctx.TezosURL, "url", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
+	f.StringVar(&ctx.ChainID, "chain", "main", "Chain ID")
+	f.BoolVar(&useColors, "colors", true, "Use colors")
+
+	rootCmd.AddCommand(NewBlockCommand(&ctx))
+
+	return rootCmd
 }
 
 // Execute executes root command
 func Execute() error {
-	return rootCmd.Execute()
+	return NewRootCommand().Execute()
 }
