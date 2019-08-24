@@ -42,12 +42,14 @@ Volume:{{"\t\t"}}{{printf "%-30d" .Volume | au.Green}}{{"\t"}}Fees:{{"\t"}}{{.Fe
 {{end}}
 `
 
+// BlockCommandContext represents `block' command context shared with its children
 type BlockCommandContext struct {
 	*RootContext
-	NewEncoder      utils.NewEncoderFunc
-	TemplateFuncMap template.FuncMap
+	newEncoder      utils.NewEncoderFunc
+	templateFuncMap template.FuncMap
 }
 
+// NewBlockCommand returns new `block' command
 func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	var (
 		outputFormat string
@@ -69,8 +71,8 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return err
 			}
 
-			ctx.NewEncoder = utils.GetEncoderFunc(outputFormat)
-			ctx.TemplateFuncMap = template.FuncMap{"au": func() interface{} { return ctx.Colorizer }}
+			ctx.newEncoder = utils.GetEncoderFunc(outputFormat)
+			ctx.templateFuncMap = template.FuncMap{"au": func() interface{} { return ctx.colorizer }}
 
 			return nil
 		},
@@ -80,7 +82,7 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				args = []string{"head"}
 			}
 
-			if ctx.NewEncoder != nil {
+			if ctx.newEncoder != nil {
 				return ctx.printBlockEncoded(args)
 			}
 
@@ -94,13 +96,13 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 }
 
 func (c *BlockCommandContext) printBlockEncoded(args []string) error {
-	enc := c.NewEncoder(os.Stdout)
-	s := &tezos.Service{Client: c.TezosClient}
+	enc := c.newEncoder(os.Stdout)
+	s := &tezos.Service{Client: c.tezosClient}
 
 	blocks := make([]*tezos.Block, len(args))
 
 	for i, id := range args {
-		block, err := s.GetBlock(context.TODO(), c.ChainID, id)
+		block, err := s.GetBlock(context.TODO(), c.chainID, id)
 		if err != nil {
 			return err
 		}
@@ -111,9 +113,9 @@ func (c *BlockCommandContext) printBlockEncoded(args []string) error {
 }
 
 func (c *BlockCommandContext) printBlockText(args []string) error {
-	s := &tezos.Service{Client: c.TezosClient}
+	s := &tezos.Service{Client: c.tezosClient}
 
-	tpl, err := template.New("block").Funcs(c.TemplateFuncMap).Parse(blockTplText)
+	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
 	if err != nil {
 		return err
 	}
@@ -128,7 +130,7 @@ func (c *BlockCommandContext) printBlockText(args []string) error {
 	tplData := make([]*blockTplData, len(args))
 
 	for i, id := range args {
-		block, err := s.GetBlock(context.TODO(), c.ChainID, id)
+		block, err := s.GetBlock(context.TODO(), c.chainID, id)
 		if err != nil {
 			return err
 		}
@@ -137,7 +139,7 @@ func (c *BlockCommandContext) printBlockText(args []string) error {
 			Block: block,
 		}
 
-		t.Successor, _ = s.GetBlock(context.TODO(), c.ChainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+		t.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
 
 		for _, ol := range block.Operations {
 			for _, o := range ol {

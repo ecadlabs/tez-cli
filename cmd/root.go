@@ -28,13 +28,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// RootContext represents root command context shared with its children
 type RootContext struct {
-	TezosURL    string
-	ChainID     string
-	TezosClient *tezos.RPCClient
-	Colorizer   aurora.Aurora
+	tezosURL    string
+	chainID     string
+	tezosClient *tezos.RPCClient
+	colorizer   aurora.Aurora
 }
 
+// NewRootCommand returns new root command
 func NewRootCommand() *cobra.Command {
 	var (
 		useColors bool
@@ -47,8 +49,8 @@ func NewRootCommand() *cobra.Command {
 		Long:  `This utility allows you to inspect and manipulate a running Tezos instance`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) (err error) {
 			// cmd always points to the top level command!!!
-			ctx.Colorizer = aurora.NewAurora(useColors)
-			ctx.TezosClient, err = tezos.NewRPCClient(nil, ctx.TezosURL)
+			ctx.colorizer = aurora.NewAurora(useColors)
+			ctx.tezosClient, err = tezos.NewRPCClient(nil, ctx.tezosURL)
 			if err != nil {
 				err = fmt.Errorf("Failed to initilize tezos RPC client: %v", err)
 			}
@@ -58,8 +60,8 @@ func NewRootCommand() *cobra.Command {
 
 	f := rootCmd.PersistentFlags()
 
-	f.StringVar(&ctx.TezosURL, "url", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
-	f.StringVar(&ctx.ChainID, "chain", "main", "Chain ID")
+	f.StringVar(&ctx.tezosURL, "url", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
+	f.StringVar(&ctx.chainID, "chain", "main", "Chain ID")
 	f.BoolVar(&useColors, "colors", true, "Use colors")
 
 	rootCmd.AddCommand(NewBlockCommand(&ctx))
