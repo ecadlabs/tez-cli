@@ -21,7 +21,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/ecadlabs/tez/cmd"
@@ -29,7 +28,7 @@ import (
 
 func main() {
 	if err := cmd.Execute(); err != nil {
-		fmt.Println(err)
+		//fmt.Println(err)
 		os.Exit(1)
 	}
 }

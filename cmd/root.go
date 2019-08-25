@@ -22,9 +22,11 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/ecadlabs/go-tezos"
 	"github.com/logrusorgru/aurora"
+	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +51,7 @@ func NewRootCommand() *cobra.Command {
 		Long:  `This utility allows you to inspect and manipulate a running Tezos instance`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) (err error) {
 			// cmd always points to the top level command!!!
-			ctx.colorizer = aurora.NewAurora(useColors)
+			ctx.colorizer = aurora.NewAurora(useColors && isatty.IsTerminal(os.Stdout.Fd()))
 			ctx.tezosClient, err = tezos.NewRPCClient(nil, ctx.tezosURL)
 			if err != nil {
 				err = fmt.Errorf("Failed to initilize tezos RPC client: %v", err)

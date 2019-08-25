@@ -22,8 +22,11 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"text/template"
 
 	"github.com/spf13/cobra"
@@ -42,11 +45,31 @@ Volume:{{"\t\t"}}{{printf "%-30d" .Volume | au.Green}}{{"\t"}}Fees:{{"\t"}}{{.Fe
 {{end}}
 `
 
+// TODO: not all of these operation are supported by the client library
+var knownKinds = map[string]struct{}{
+	"endorsement":                 struct{}{},
+	"seed_nonce_revelation":       struct{}{},
+	"double_endorsement_evidence": struct{}{},
+	"double_baking_evidence":      struct{}{},
+	"activate_account":            struct{}{},
+	"proposals":                   struct{}{},
+	"ballot":                      struct{}{},
+	"reveal":                      struct{}{},
+	"transaction":                 struct{}{},
+	"origination":                 struct{}{},
+	"delegation":                  struct{}{},
+}
+
 // BlockCommandContext represents `block' command context shared with its children
 type BlockCommandContext struct {
 	*RootContext
 	newEncoder      utils.NewEncoderFunc
 	templateFuncMap template.FuncMap
+}
+
+type xblock struct {
+	*tezos.Block
+	Successor *tezos.Block `json:"-" yaml:"-"`
 }
 
 // NewBlockCommand returns new `block' command
@@ -61,8 +84,9 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	}
 
 	blockCmd = &cobra.Command{
-		Use:   "block",
-		Short: "Blocks inspection",
+		Use:     "block",
+		Aliases: []string{"b"},
+		Short:   "Blocks inspection",
 
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// https://github.com/spf13/cobra/issues/216
@@ -82,66 +106,111 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				args = []string{"head"}
 			}
 
-			if ctx.newEncoder != nil {
-				return ctx.printBlockEncoded(args)
+			blocks, err := ctx.getBlocks(args, ctx.newEncoder == nil)
+			if err != nil {
+				return err
 			}
 
-			return ctx.printBlockText(args)
+			if ctx.newEncoder != nil {
+				enc := ctx.newEncoder(os.Stdout)
+				return enc.Encode(blocks)
+			}
+
+			return ctx.printBlocksSummaryText(blocks)
 		},
 	}
 
+	// Just an alias
+	headerCmd := &cobra.Command{
+		Use:   "header",
+		Short: "Block header summary",
+		RunE:  blockCmd.RunE,
+	}
+
+	var opKinds string
+
+	operationsCmd := &cobra.Command{
+		Use:     "operations",
+		Aliases: []string{"op"},
+		Short:   "Inspect block operations",
+
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 0 {
+				args = []string{"head"}
+			}
+
+			var kinds map[string]struct{}
+			if opKinds != "all" {
+				s := strings.Split(opKinds, ",")
+				kinds = make(map[string]struct{}, len(s))
+
+				for _, op := range s {
+					if _, ok := knownKinds[op]; !ok {
+						return fmt.Errorf("Unknown operation kind: `%s'", op)
+					}
+					kinds[op] = struct{}{}
+				}
+			}
+
+			return errors.New("Not implemented")
+		},
+	}
+
+	// TODO: other kinds
+	operationsCmd.Flags().StringVarP(&opKinds, "kind", "k", "all", "Operation kinds: either comma separated list of [transaction, endorsement] or `all'")
+
 	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, yaml, json]")
+	blockCmd.AddCommand(headerCmd)
+	blockCmd.AddCommand(operationsCmd)
 
 	return blockCmd
 }
 
-func (c *BlockCommandContext) printBlockEncoded(args []string) error {
-	enc := c.newEncoder(os.Stdout)
+func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xblock, error) {
 	s := &tezos.Service{Client: c.tezosClient}
 
-	blocks := make([]*tezos.Block, len(args))
+	blocks := make([]*xblock, len(ids))
 
-	for i, id := range args {
+	for i, id := range ids {
 		block, err := s.GetBlock(context.TODO(), c.chainID, id)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		blocks[i] = block
+
+		xb := xblock{
+			Block: block,
+		}
+
+		if getSuccessors {
+			xb.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+		}
+
+		blocks[i] = &xb
 	}
 
-	return enc.Encode(blocks)
+	return blocks, nil
 }
 
-func (c *BlockCommandContext) printBlockText(args []string) error {
-	s := &tezos.Service{Client: c.tezosClient}
-
+func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
 	if err != nil {
 		return err
 	}
 
 	type blockTplData struct {
-		*tezos.Block
-		Successor *tezos.Block
-		Volume    int64
-		Fees      int64
+		*xblock
+		Volume int64
+		Fees   int64
 	}
 
-	tplData := make([]*blockTplData, len(args))
+	tplData := make([]*blockTplData, len(blocks))
 
-	for i, id := range args {
-		block, err := s.GetBlock(context.TODO(), c.chainID, id)
-		if err != nil {
-			return err
-		}
-
+	for i, b := range blocks {
 		t := &blockTplData{
-			Block: block,
+			xblock: b,
 		}
 
-		t.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
-
-		for _, ol := range block.Operations {
+		for _, ol := range b.Operations {
 			for _, o := range ol {
 				for _, c := range o.Contents {
 					if el, ok := c.(*tezos.TransactionOperationElem); ok {
