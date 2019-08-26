@@ -46,8 +46,9 @@ Priority:     {{.Header.Priority}}
 Solvetime:    {{.Metadata.MaxOperationsTTL}}
 Baker:        {{.Metadata.Baker}}
 Consumed Gas: {{.Metadata.ConsumedGas}}
-Volume:       {{printf "%.3f ꜩ" .Volume | au.Green}}
-Fees:         {{printf "%.3f ꜩ" .Fees}}
+Volume:       {{printf "%.6f ꜩ" .Volume | au.Green}}
+Fees:         {{printf "%.6f ꜩ" .Fees}}
+Rewards:      {{printf "%.6f ꜩ" .Rewards}}
 Operations:   {{.Operations}}
 {{end}}
 `
@@ -234,15 +235,27 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 		Operations int
 		Volume     *big.Float
 		Fees       *big.Float
+		Rewards    *big.Float
 	}
 
 	tplData := make([]*blockTplData, len(blocks))
 
 	for i, b := range blocks {
 		t := &blockTplData{
-			xblock: b,
-			Volume: big.NewFloat(0),
-			Fees:   big.NewFloat(0),
+			xblock:  b,
+			Volume:  big.NewFloat(0),
+			Fees:    big.NewFloat(0),
+			Rewards: big.NewFloat(0),
+		}
+
+		for _, b := range b.Metadata.BalanceUpdates {
+			if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
+				if bu.Category == "rewards" {
+					var rewards big.Float
+					rewards.SetInt64(int64(bu.Change))
+					t.Rewards.Add(t.Rewards, &rewards)
+				}
+			}
 		}
 
 		for _, ol := range b.Operations {
@@ -257,6 +270,19 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 
 						amount.SetInt((*big.Int)(&el.Amount))
 						t.Volume.Add(t.Volume, &amount)
+
+					case *tezos.EndorsementOperationElem:
+						if el.Metadata != nil {
+							for _, b := range el.Metadata.BalanceUpdates {
+								if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
+									if bu.Category == "rewards" {
+										var rewards big.Float
+										rewards.SetInt64(int64(bu.Change))
+										t.Rewards.Add(t.Rewards, &rewards)
+									}
+								}
+							}
+						}
 					}
 				}
 			}
@@ -264,6 +290,7 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 
 		t.Volume.Mul(t.Volume, big.NewFloat(1e-6))
 		t.Fees.Mul(t.Fees, big.NewFloat(1e-6))
+		t.Rewards.Mul(t.Rewards, big.NewFloat(1e-6))
 
 		tplData[i] = t
 	}
