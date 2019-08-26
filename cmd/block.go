@@ -24,9 +24,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"strconv"
-	"strings"
 	"text/template"
 
 	"github.com/spf13/cobra"
@@ -36,28 +36,57 @@ import (
 )
 
 const blockTplText = `{{range . -}}
-Block:{{"\t\t"}}{{au.BgGreen .Hash}}
-Predecessor:{{"\t"}}{{au.Blue .Header.Predecessor}}
-Successor:{{"\t"}}{{with .Successor}}{{.Hash}}{{else}}--{{end}}
-Level:{{"\t\t"}}{{.Header.Level}}
-Timestamp:{{"\t"}}{{printf "%-30v" .Header.Timestamp}}{{"\t"}}Nonce hash:{{"\t"}}{{.Metadata.NonceHash}}
-Volume:{{"\t\t"}}{{printf "%-30d" .Volume | au.Green}}{{"\t"}}Fees:{{"\t"}}{{.Fees}}
+Block:        {{.Hash | au.BgGreen}}
+Predecessor:  {{.Header.Predecessor | au.Blue}}
+Successor:    {{with .Successor}}{{.Hash}}{{else}}--{{end}}
+Timestamp:    {{.Header.Timestamp}}
+Level:        {{.Header.Level}}
+Cycle:        {{.Metadata.Level.Cycle}}
+Priority:     {{.Header.Priority}}
+Solvetime:    {{.Metadata.MaxOperationsTTL}}
+Baker:        {{.Metadata.Baker}}
+Consumed Gas: {{.Metadata.ConsumedGas}}
+Volume:       {{printf "%.3f ꜩ" .Volume | au.Green}}
+Fees:         {{printf "%.3f ꜩ" .Fees}}
+Operations:   {{.Operations}}
 {{end}}
 `
 
+const (
+	opEndorsement               = "endorsement"
+	opSeedNonceRevelation       = "seed_nonce_revelation"
+	opDoubleEndorsementEvidence = "double_endorsement_evidence"
+	opDoubleBakingEvidence      = "double_baking_evidence"
+	opActivateAccount           = "activate_account"
+	opProposals                 = "proposals"
+	opBallot                    = "ballot"
+	opReveal                    = "reveal"
+	opTransaction               = "transaction"
+	opOrigination               = "origination"
+	opDelegation                = "delegation"
+)
+
 // TODO: not all of these operation are supported by the client library
-var knownKinds = map[string]struct{}{
-	"endorsement":                 struct{}{},
-	"seed_nonce_revelation":       struct{}{},
-	"double_endorsement_evidence": struct{}{},
-	"double_baking_evidence":      struct{}{},
-	"activate_account":            struct{}{},
-	"proposals":                   struct{}{},
-	"ballot":                      struct{}{},
-	"reveal":                      struct{}{},
-	"transaction":                 struct{}{},
-	"origination":                 struct{}{},
-	"delegation":                  struct{}{},
+var knownKinds = map[string]string{
+	"endorsement":                 opEndorsement,
+	"end":                         opEndorsement,
+	"seed_nonce_revelation":       opSeedNonceRevelation,
+	"double_endorsement_evidence": opDoubleEndorsementEvidence,
+	"double_baking_evidence":      opDoubleBakingEvidence,
+	"activate_account":            opActivateAccount,
+	"act":                         opActivateAccount,
+	"proposals":                   opProposals,
+	"prop":                        opProposals,
+	"ballot":                      opBallot,
+	"bal":                         opBallot,
+	"reveal":                      opReveal,
+	"rev":                         opReveal,
+	"transaction":                 opTransaction,
+	"tx":                          opTransaction,
+	"origination":                 opOrigination,
+	"orig":                        opOrigination,
+	"delegation":                  opDelegation,
+	"del":                         opDelegation,
 }
 
 // BlockCommandContext represents `block' command context shared with its children
@@ -85,14 +114,18 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 
 	blockCmd = &cobra.Command{
 		Use:     "block",
-		Aliases: []string{"b"},
+		Aliases: []string{"bl"},
 		Short:   "Blocks inspection",
 
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			// https://github.com/spf13/cobra/issues/216
 			// Also note that `cmd` always points to the top level command and not to ourselves
-			if err := blockCmd.Parent().PersistentPreRunE(cmd, args); err != nil {
-				return err
+			if p := blockCmd.Parent(); p != nil {
+				if pr := p.PersistentPreRunE; pr != nil {
+					if err := pr(cmd, args); err != nil {
+						return err
+					}
+				}
 			}
 
 			ctx.newEncoder = utils.GetEncoderFunc(outputFormat)
@@ -127,7 +160,7 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 		RunE:  blockCmd.RunE,
 	}
 
-	var opKinds string
+	var opKinds []string
 
 	operationsCmd := &cobra.Command{
 		Use:     "operations",
@@ -140,15 +173,14 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 			}
 
 			var kinds map[string]struct{}
-			if opKinds != "all" {
-				s := strings.Split(opKinds, ",")
-				kinds = make(map[string]struct{}, len(s))
-
-				for _, op := range s {
-					if _, ok := knownKinds[op]; !ok {
-						return fmt.Errorf("Unknown operation kind: `%s'", op)
+			if len(opKinds) != 0 {
+				kinds = make(map[string]struct{}, len(opKinds))
+				for _, kind := range opKinds {
+					if k, ok := knownKinds[kind]; ok {
+						kinds[k] = struct{}{}
+					} else {
+						return fmt.Errorf("Unknown operation kind: `%s'", k)
 					}
-					kinds[op] = struct{}{}
 				}
 			}
 
@@ -157,7 +189,7 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	}
 
 	// TODO: other kinds
-	operationsCmd.Flags().StringVarP(&opKinds, "kind", "k", "all", "Operation kinds: either comma separated list of [transaction, endorsement] or `all'")
+	operationsCmd.Flags().StringSliceVarP(&opKinds, "kind", "k", nil, "Operation kinds: either comma separated list of [end[orsement], act[ivate_account], prop[osals], bal[lot], rev[eal], transaction|tx, orig[ination], del[egation], seed_nonce_revelation, double_endorsement_evidence, double_baking_evidence] or `all'")
 
 	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, yaml, json]")
 	blockCmd.AddCommand(headerCmd)
@@ -199,8 +231,9 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 
 	type blockTplData struct {
 		*xblock
-		Volume int64
-		Fees   int64
+		Operations int
+		Volume     *big.Float
+		Fees       *big.Float
 	}
 
 	tplData := make([]*blockTplData, len(blocks))
@@ -208,18 +241,29 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 	for i, b := range blocks {
 		t := &blockTplData{
 			xblock: b,
+			Volume: big.NewFloat(0),
+			Fees:   big.NewFloat(0),
 		}
 
 		for _, ol := range b.Operations {
 			for _, o := range ol {
+				t.Operations += len(o.Contents)
 				for _, c := range o.Contents {
-					if el, ok := c.(*tezos.TransactionOperationElem); ok {
-						t.Fees += el.Fee.Int64()
-						t.Volume += el.Amount.Int64()
+					switch el := c.(type) {
+					case *tezos.TransactionOperationElem:
+						var fee, amount big.Float
+						fee.SetInt((*big.Int)(&el.Fee))
+						t.Fees.Add(t.Fees, &fee)
+
+						amount.SetInt((*big.Int)(&el.Amount))
+						t.Volume.Add(t.Volume, &amount)
 					}
 				}
 			}
 		}
+
+		t.Volume.Mul(t.Volume, big.NewFloat(1e-6))
+		t.Fees.Mul(t.Fees, big.NewFloat(1e-6))
 
 		tplData[i] = t
 	}
