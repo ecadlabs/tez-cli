@@ -35,8 +35,7 @@ import (
 	"github.com/ecadlabs/tez/cmd/utils"
 )
 
-const blockTplText = `{{range . -}}
-Block:        {{.Hash | au.BgGreen}}
+const blockTplText = `Block:        {{.Hash | au.BgGreen}}
 Predecessor:  {{.Header.Predecessor | au.Blue}}
 Successor:    {{with .Successor}}{{.Hash}}{{else}}--{{end}}
 Timestamp:    {{.Header.Timestamp}}
@@ -50,7 +49,7 @@ Volume:       {{printf "%.6f ꜩ" .Volume | au.Green}}
 Fees:         {{printf "%.6f ꜩ" .Fees}}
 Rewards:      {{printf "%.6f ꜩ" .Rewards}}
 Operations:   {{.Operations}}
-{{end}}
+
 `
 
 const (
@@ -93,6 +92,7 @@ var knownKinds = map[string]string{
 // BlockCommandContext represents `block' command context shared with its children
 type BlockCommandContext struct {
 	*RootContext
+	blockTemplate   string
 	newEncoder      utils.NewEncoderFunc
 	templateFuncMap template.FuncMap
 }
@@ -192,7 +192,8 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	// TODO: other kinds
 	operationsCmd.Flags().StringSliceVarP(&opKinds, "kind", "k", nil, "Operation kinds: either comma separated list of [end[orsement], act[ivate_account], prop[osals], bal[lot], rev[eal], transaction|tx, orig[ination], del[egation], seed_nonce_revelation, double_endorsement_evidence, double_baking_evidence] or `all'")
 
-	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-format", "o", "text", "Output format: one of [text, yaml, json]")
+	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-encoding", "o", "text", "Output encoding: one of [text, yaml, json]")
+	blockCmd.PersistentFlags().StringVar(&ctx.blockTemplate, "format", "", "Go template for the text encoding")
 	blockCmd.AddCommand(headerCmd)
 	blockCmd.AddCommand(operationsCmd)
 
@@ -225,7 +226,12 @@ func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xb
 }
 
 func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
-	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
+	tplText := c.blockTemplate
+	if tplText == "" {
+		tplText = blockTplText
+	}
+
+	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(tplText)
 	if err != nil {
 		return err
 	}
@@ -238,10 +244,8 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 		Rewards    *big.Float
 	}
 
-	tplData := make([]*blockTplData, len(blocks))
-
-	for i, b := range blocks {
-		t := &blockTplData{
+	for _, b := range blocks {
+		t := blockTplData{
 			xblock:  b,
 			Volume:  big.NewFloat(0),
 			Fees:    big.NewFloat(0),
@@ -292,8 +296,10 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 		t.Fees.Mul(t.Fees, big.NewFloat(1e-6))
 		t.Rewards.Mul(t.Rewards, big.NewFloat(1e-6))
 
-		tplData[i] = t
+		if err := tpl.Execute(os.Stdout, &t); err != nil {
+			return err
+		}
 	}
 
-	return tpl.Execute(os.Stdout, tplData)
+	return nil
 }
