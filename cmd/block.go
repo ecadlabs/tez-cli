@@ -35,7 +35,8 @@ import (
 	"github.com/ecadlabs/tez/cmd/utils"
 )
 
-const blockTplText = `Block:        {{.Hash | au.BgGreen}}
+const blockTplText = `{{range . -}}
+Block:        {{.Hash | au.BgGreen}}
 Predecessor:  {{.Header.Predecessor | au.Blue}}
 Successor:    {{with .Successor}}{{.Hash}}{{else}}--{{end}}
 Timestamp:    {{.Header.Timestamp}}
@@ -48,8 +49,8 @@ Consumed Gas: {{.Metadata.ConsumedGas}}
 Volume:       {{printf "%.6f ꜩ" .Volume | au.Green}}
 Fees:         {{printf "%.6f ꜩ" .Fees}}
 Rewards:      {{printf "%.6f ꜩ" .Rewards}}
-Operations:   {{.Operations}}
-
+Operations:   {{.OperationsNum}}
+{{end}}
 `
 
 const (
@@ -92,7 +93,6 @@ var knownKinds = map[string]string{
 // BlockCommandContext represents `block' command context shared with its children
 type BlockCommandContext struct {
 	*RootContext
-	blockTemplate   string
 	newEncoder      utils.NewEncoderFunc
 	templateFuncMap template.FuncMap
 }
@@ -193,97 +193,181 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	operationsCmd.Flags().StringSliceVarP(&opKinds, "kind", "k", nil, "Operation kinds: either comma separated list of [end[orsement], act[ivate_account], prop[osals], bal[lot], rev[eal], transaction|tx, orig[ination], del[egation], seed_nonce_revelation, double_endorsement_evidence, double_baking_evidence] or `all'")
 
 	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-encoding", "o", "text", "Output encoding: one of [text, yaml, json]")
-	blockCmd.PersistentFlags().StringVar(&ctx.blockTemplate, "format", "", "Go template for the text encoding")
 	blockCmd.AddCommand(headerCmd)
 	blockCmd.AddCommand(operationsCmd)
 
 	return blockCmd
 }
 
-func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xblock, error) {
+func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock, error) {
+	var i int
+	for i < len(query) && (query[i] >= '0' && query[i] <= '9' || query[i] >= 'a' && query[i] <= 'z' || query[i] >= 'A' && query[i] <= 'Z') {
+		i++
+	}
+
+	id := query[:i]
+
+	var offset int
+	if i < len(query) {
+		// parse the offset
+		if query[i] == '~' {
+			for i < len(query) && query[i] == '~' {
+				i++
+				offset++
+			}
+		}
+
+		if i < len(query) {
+			v, err := strconv.ParseInt(query[i:], 10, 32)
+			if err != nil {
+				return nil, err
+			}
+			offset = int(v)
+		}
+	}
+
 	s := &tezos.Service{Client: c.tezosClient}
 
-	blocks := make([]*xblock, len(ids))
+	var (
+		block *tezos.Block
+		err   error
+	)
 
-	for i, id := range ids {
-		block, err := s.GetBlock(context.TODO(), c.chainID, id)
+	if len(id) == 0 || (id[0] >= '0' && id[0] <= '9') {
+		// parse level
+		var level int
+		if len(id) != 0 {
+			v, err := strconv.ParseInt(id, 10, 32)
+			if err != nil {
+				return nil, err
+			}
+			level = int(v)
+		}
+
+		block, err = s.GetBlock(context.TODO(), c.chainID, strconv.FormatInt(int64(level+offset), 10))
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		// traverse
+		block, err = s.GetBlock(context.TODO(), c.chainID, id)
 		if err != nil {
 			return nil, err
 		}
 
-		xb := xblock{
-			Block: block,
+		if offset != 0 {
+			block, err = s.GetBlock(context.TODO(), c.chainID, strconv.FormatInt(int64(block.Header.Level+offset), 10))
+			if err != nil {
+				return nil, err
+			}
 		}
+	}
 
-		if getSuccessors {
-			xb.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+	xb := xblock{
+		Block: block,
+	}
+
+	if getSuccessor {
+		xb.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+	}
+
+	return &xb, nil
+}
+
+func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xblock, error) {
+	blocks := make([]*xblock, len(ids))
+
+	for i, id := range ids {
+		var err error
+		blocks[i], err = c.getBlock(id, getSuccessors)
+		if err != nil {
+			return nil, err
 		}
-
-		blocks[i] = &xb
 	}
 
 	return blocks, nil
 }
 
 func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
-	tplText := c.blockTemplate
-	if tplText == "" {
-		tplText = blockTplText
-	}
-
-	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(tplText)
+	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
 	if err != nil {
 		return err
 	}
 
 	type blockTplData struct {
 		*xblock
-		Operations int
-		Volume     *big.Float
-		Fees       *big.Float
-		Rewards    *big.Float
+		*blockInfo
 	}
 
-	for _, b := range blocks {
-		t := blockTplData{
-			xblock:  b,
-			Volume:  big.NewFloat(0),
-			Fees:    big.NewFloat(0),
-			Rewards: big.NewFloat(0),
-		}
+	tplData := make([]*blockTplData, len(blocks))
 
-		for _, b := range b.Metadata.BalanceUpdates {
-			if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
-				if bu.Category == "rewards" {
-					var rewards big.Float
-					rewards.SetInt64(int64(bu.Change))
-					t.Rewards.Add(t.Rewards, &rewards)
-				}
+	for i, b := range blocks {
+		tplData[i] = &blockTplData{
+			xblock:    b,
+			blockInfo: getBlockInfo(b.Block),
+		}
+	}
+
+	return tpl.Execute(os.Stdout, tplData)
+}
+
+// brief block info suitable for the template rendering
+type opInfo struct {
+	From   string
+	Type   string
+	To     string
+	Amount *big.Float
+	Fee    *big.Float
+	Hash   string
+}
+
+type blockInfo struct {
+	Volume         *big.Float
+	Fees           *big.Float
+	Rewards        *big.Float
+	OperationsNum  int
+	OperationsInfo []*opInfo
+}
+
+func getBlockInfo(b *tezos.Block) *blockInfo {
+	bi := blockInfo{
+		Volume:  big.NewFloat(0),
+		Fees:    big.NewFloat(0),
+		Rewards: big.NewFloat(0),
+	}
+
+	for _, b := range b.Metadata.BalanceUpdates {
+		if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
+			if bu.Category == "rewards" {
+				var rewards big.Float
+				rewards.SetInt64(int64(bu.Change))
+				bi.Rewards.Add(bi.Rewards, &rewards)
 			}
 		}
+	}
 
-		for _, ol := range b.Operations {
-			for _, o := range ol {
-				t.Operations += len(o.Contents)
-				for _, c := range o.Contents {
-					switch el := c.(type) {
-					case *tezos.TransactionOperationElem:
-						var fee, amount big.Float
-						fee.SetInt((*big.Int)(&el.Fee))
-						t.Fees.Add(t.Fees, &fee)
+	for _, ol := range b.Operations {
+		for _, o := range ol {
+			bi.OperationsNum += len(o.Contents)
 
-						amount.SetInt((*big.Int)(&el.Amount))
-						t.Volume.Add(t.Volume, &amount)
+			for _, c := range o.Contents {
+				switch el := c.(type) {
+				case *tezos.TransactionOperationElem:
+					var fee, amount big.Float
+					fee.SetInt((*big.Int)(&el.Fee))
+					bi.Fees.Add(bi.Fees, &fee)
 
-					case *tezos.EndorsementOperationElem:
-						if el.Metadata != nil {
-							for _, b := range el.Metadata.BalanceUpdates {
-								if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
-									if bu.Category == "rewards" {
-										var rewards big.Float
-										rewards.SetInt64(int64(bu.Change))
-										t.Rewards.Add(t.Rewards, &rewards)
-									}
+					amount.SetInt((*big.Int)(&el.Amount))
+					bi.Volume.Add(bi.Volume, &amount)
+
+				case *tezos.EndorsementOperationElem:
+					if el.Metadata != nil {
+						for _, b := range el.Metadata.BalanceUpdates {
+							if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
+								if bu.Category == "rewards" {
+									var rewards big.Float
+									rewards.SetInt64(int64(bu.Change))
+									bi.Rewards.Add(bi.Rewards, &rewards)
 								}
 							}
 						}
@@ -291,15 +375,11 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 				}
 			}
 		}
-
-		t.Volume.Mul(t.Volume, big.NewFloat(1e-6))
-		t.Fees.Mul(t.Fees, big.NewFloat(1e-6))
-		t.Rewards.Mul(t.Rewards, big.NewFloat(1e-6))
-
-		if err := tpl.Execute(os.Stdout, &t); err != nil {
-			return err
-		}
 	}
 
-	return nil
+	bi.Volume.Mul(bi.Volume, big.NewFloat(1e-6))
+	bi.Fees.Mul(bi.Fees, big.NewFloat(1e-6))
+	bi.Rewards.Mul(bi.Rewards, big.NewFloat(1e-6))
+
+	return &bi
 }
