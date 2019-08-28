@@ -48,9 +48,20 @@ Baker:        {{.Metadata.Baker}}
 Consumed Gas: {{.Metadata.ConsumedGas}}
 Volume:       {{printf "%.6f ꜩ" .Volume | au.Green}}
 Fees:         {{printf "%.6f ꜩ" .Fees}}
-Rewards:      {{printf "%.6f ꜩ" .Rewards}}
 Operations:   {{.OperationsNum}}
-{{end}}
+
+{{with .OperationsInfo -}}
+{{range . -}}
+Type:   {{or .Title .Kind}}
+From:   {{or .Source "--"}}
+To:     {{or .Destination "--"}}
+Amount: {{if .Amount}}{{printf "%.6f ꜩ" .Amount}}{{else}}--{{end}}
+Fee:    {{if .Fee}}{{printf "%.6f ꜩ" .Fee}}{{else}}--{{end}}
+Hash:   {{.Hash}}
+
+{{end -}}
+{{end -}}
+{{end -}}
 `
 
 const (
@@ -88,6 +99,20 @@ var knownKinds = map[string]string{
 	"orig":                        opOrigination,
 	"delegation":                  opDelegation,
 	"del":                         opDelegation,
+}
+
+var operationTitles = map[string]string{
+	opEndorsement:               "Endorsement",
+	opSeedNonceRevelation:       "Nonce",
+	opDoubleEndorsementEvidence: "Double Endorsement Evidence",
+	opDoubleBakingEvidence:      "Double Baking Evidence",
+	opActivateAccount:           "Activation",
+	opProposals:                 "Proposals",
+	opBallot:                    "Ballot",
+	opReveal:                    "Reveal",
+	opTransaction:               "Transaction",
+	opOrigination:               "Origination",
+	opDelegation:                "Delegation",
 }
 
 // BlockCommandContext represents `block' command context shared with its children
@@ -150,7 +175,7 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return enc.Encode(blocks)
 			}
 
-			return ctx.printBlocksSummaryText(blocks)
+			return ctx.printBlocksSummaryText(blocks, false, nil)
 		},
 	}
 
@@ -185,7 +210,17 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				}
 			}
 
-			return errors.New("Not implemented")
+			// TODO JSON/YAML
+			if ctx.newEncoder != nil {
+				return errors.New("Not implemented")
+			}
+
+			blocks, err := ctx.getBlocks(args, true)
+			if err != nil {
+				return err
+			}
+
+			return ctx.printBlocksSummaryText(blocks, true, kinds)
 		},
 	}
 
@@ -210,7 +245,9 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 	var offset int
 	if i < len(query) {
 		// parse the offset
+		sign := 1
 		if query[i] == '~' {
+			sign = -1
 			for i < len(query) && query[i] == '~' {
 				i++
 				offset++
@@ -224,6 +261,8 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 			}
 			offset = int(v)
 		}
+
+		offset *= sign
 	}
 
 	s := &tezos.Service{Client: c.tezosClient}
@@ -288,7 +327,7 @@ func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xb
 	return blocks, nil
 }
 
-func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
+func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock, getops bool, opsFilter map[string]struct{}) error {
 	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
 	if err != nil {
 		return err
@@ -297,6 +336,7 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 	type blockTplData struct {
 		*xblock
 		*blockInfo
+		OperationsInfo []*opInfo
 	}
 
 	tplData := make([]*blockTplData, len(blocks))
@@ -306,6 +346,10 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 			xblock:    b,
 			blockInfo: getBlockInfo(b.Block),
 		}
+
+		if getops {
+			tplData[i].OperationsInfo = getBlockOperations(b.Block, opsFilter)
+		}
 	}
 
 	return tpl.Execute(os.Stdout, tplData)
@@ -313,37 +357,25 @@ func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock) error {
 
 // brief block info suitable for the template rendering
 type opInfo struct {
-	From   string
-	Type   string
-	To     string
-	Amount *big.Float
-	Fee    *big.Float
-	Hash   string
+	Source      string
+	Kind        string
+	Title       string
+	Destination string
+	Amount      *big.Float
+	Fee         *big.Float
+	Hash        string
 }
 
 type blockInfo struct {
-	Volume         *big.Float
-	Fees           *big.Float
-	Rewards        *big.Float
-	OperationsNum  int
-	OperationsInfo []*opInfo
+	Volume        *big.Float
+	Fees          *big.Float
+	OperationsNum int
 }
 
 func getBlockInfo(b *tezos.Block) *blockInfo {
 	bi := blockInfo{
-		Volume:  big.NewFloat(0),
-		Fees:    big.NewFloat(0),
-		Rewards: big.NewFloat(0),
-	}
-
-	for _, b := range b.Metadata.BalanceUpdates {
-		if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
-			if bu.Category == "rewards" {
-				var rewards big.Float
-				rewards.SetInt64(int64(bu.Change))
-				bi.Rewards.Add(bi.Rewards, &rewards)
-			}
-		}
+		Volume: big.NewFloat(0),
+		Fees:   big.NewFloat(0),
 	}
 
 	for _, ol := range b.Operations {
@@ -351,26 +383,19 @@ func getBlockInfo(b *tezos.Block) *blockInfo {
 			bi.OperationsNum += len(o.Contents)
 
 			for _, c := range o.Contents {
-				switch el := c.(type) {
-				case *tezos.TransactionOperationElem:
-					var fee, amount big.Float
-					fee.SetInt((*big.Int)(&el.Fee))
-					bi.Fees.Add(bi.Fees, &fee)
+				if el, ok := c.(tezos.OperationWithFee); ok {
+					var fee big.Float
+					if f := el.OperationFee(); f != nil {
+						fee.SetInt(f)
+						bi.Fees.Add(bi.Fees, &fee)
+					}
+				}
 
-					amount.SetInt((*big.Int)(&el.Amount))
-					bi.Volume.Add(bi.Volume, &amount)
-
-				case *tezos.EndorsementOperationElem:
-					if el.Metadata != nil {
-						for _, b := range el.Metadata.BalanceUpdates {
-							if bu, ok := b.(*tezos.FreezerBalanceUpdate); ok {
-								if bu.Category == "rewards" {
-									var rewards big.Float
-									rewards.SetInt64(int64(bu.Change))
-									bi.Rewards.Add(bi.Rewards, &rewards)
-								}
-							}
-						}
+				if el, ok := c.(*tezos.TransactionOperationElem); ok {
+					var amount big.Float
+					if el.Amount != nil {
+						amount.SetInt(&el.Amount.Int)
+						bi.Volume.Add(bi.Volume, &amount)
 					}
 				}
 			}
@@ -379,7 +404,90 @@ func getBlockInfo(b *tezos.Block) *blockInfo {
 
 	bi.Volume.Mul(bi.Volume, big.NewFloat(1e-6))
 	bi.Fees.Mul(bi.Fees, big.NewFloat(1e-6))
-	bi.Rewards.Mul(bi.Rewards, big.NewFloat(1e-6))
 
 	return &bi
+}
+
+func getBlockOperations(b *tezos.Block, opsFilter map[string]struct{}) (info []*opInfo) {
+	for _, ol := range b.Operations {
+		for _, o := range ol {
+			for _, c := range o.Contents {
+				if _, ok := opsFilter[c.OperationElemKind()]; !ok && opsFilter != nil {
+					// Skip
+					continue
+				}
+
+				oi := &opInfo{
+					Kind:  c.OperationElemKind(),
+					Hash:  o.Hash,
+					Title: operationTitles[c.OperationElemKind()],
+				}
+
+				if el, ok := c.(tezos.OperationWithFee); ok {
+					if f := el.OperationFee(); f != nil {
+						oi.Fee = big.NewFloat(0)
+						oi.Fee.SetInt(f)
+						oi.Fee.Mul(oi.Fee, big.NewFloat(1e-6))
+					}
+				}
+
+				switch el := c.(type) {
+				case *tezos.EndorsementOperationElem:
+					oi.Source = el.Metadata.Delegate
+
+				case *tezos.TransactionOperationElem:
+					oi.Source = el.Source
+					oi.Destination = el.Destination
+					if el.Amount != nil {
+						oi.Amount = big.NewFloat(0)
+						oi.Amount.SetInt(&el.Amount.Int)
+						oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
+					}
+
+				case *tezos.BallotOperationElem:
+					oi.Source = el.Source
+
+				case *tezos.ProposalOperationElem:
+					oi.Source = el.Source
+
+				case *tezos.ActivateAccountOperationElem:
+					oi.Source = el.PKH
+					oi.Amount = big.NewFloat(0)
+					for _, b := range el.Metadata.BalanceUpdates {
+						if bu, ok := b.(*tezos.ContractBalanceUpdate); ok {
+							var amount big.Float
+							amount.SetInt64(int64(bu.Change))
+							oi.Amount.Add(oi.Amount, &amount)
+						}
+					}
+					oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
+
+				case *tezos.RevealOperationElem:
+					oi.Source = el.Source
+
+				case *tezos.OriginationOperationElem:
+					oi.Source = el.Source
+					oi.Destination = el.Delegate
+					if el.Balance != nil {
+						oi.Amount = big.NewFloat(0)
+						oi.Amount.SetInt(&el.Balance.Int)
+						oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
+					}
+
+				case *tezos.DelegationOperationElem:
+					oi.Source = el.Source
+					oi.Destination = el.Delegate
+					if el.Balance != nil {
+						oi.Amount = big.NewFloat(0)
+						oi.Amount.SetInt(&el.Balance.Int)
+						oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
+					}
+				}
+
+				info = append(info, oi)
+			}
+		}
+	}
+
+	return
 }
