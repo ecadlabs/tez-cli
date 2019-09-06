@@ -35,7 +35,8 @@ import (
 	"github.com/ecadlabs/tez/cmd/utils"
 )
 
-const blockTplText = `{{range . -}}
+const (
+	blockTemplateSrc = `{{range . -}}
 Block:        {{.Hash | au.BgGreen}}
 Predecessor:  {{.Header.Predecessor | au.Blue}}
 Successor:    {{with .Successor}}{{.Hash}}{{else}}--{{end}}
@@ -50,19 +51,15 @@ Volume:       {{printf "%.6f ꜩ" .Volume | au.Green}}
 Fees:         {{printf "%.6f ꜩ" .Fees}}
 Operations:   {{.OperationsNum}}
 
-{{with .OperationsInfo -}}
-{{range . -}}
-Type:   {{or .Title .Kind}}
-From:   {{or .Source "--"}}
-To:     {{or .Destination "--"}}
-Amount: {{if .Amount}}{{printf "%.6f ꜩ" .Amount}}{{else}}--{{end}}
-Fee:    {{if .Fee}}{{printf "%.6f ꜩ" .Fee}}{{else}}--{{end}}
-Hash:   {{.Hash}}
-
-{{end -}}
-{{end -}}
 {{end -}}
 `
+
+	operationsTemplateSrc = `   Block Type         From                                 To                                           Amount            Fee Hash
+{{range . -}}
+{{printf "%8d" .Block.Header.Level}} {{or .Title .Kind | printf "%-12.12s"}} {{or .Source "--" | printf "%-36.36s"}} {{or .Destination "--" | printf "%-36.36s"}} {{if .Amount}}{{printf "%12.6f ꜩ" .Amount}}{{else}}            --{{end}} {{if .Fee}}{{printf "%12.6f ꜩ" .Fee}}{{else}}            --{{end}} {{.Hash}}
+{{end -}}
+`
+)
 
 const (
 	opEndorsement               = "endorsement"
@@ -127,6 +124,25 @@ type xblock struct {
 	Successor *tezos.Block `json:"-" yaml:"-"`
 }
 
+// brief block info suitable for the template rendering
+type opInfo struct {
+	Source      string
+	Kind        string
+	Title       string
+	Destination string
+	Amount      *big.Float
+	Fee         *big.Float
+	Hash        string
+	Block       *xblockInfo
+}
+
+type xblockInfo struct {
+	*xblock
+	Volume        *big.Float
+	Fees          *big.Float
+	OperationsNum int
+}
+
 // NewBlockCommand returns new `block' command
 func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	var (
@@ -175,7 +191,18 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return enc.Encode(blocks)
 			}
 
-			return ctx.printBlocksSummaryText(blocks, false, nil)
+			tpl, err := template.New("block").Funcs(ctx.templateFuncMap).Parse(blockTemplateSrc)
+			if err != nil {
+				return err
+			}
+
+			data := make([]*xblockInfo, len(blocks))
+
+			for i, b := range blocks {
+				data[i] = getBlockInfo(b)
+			}
+
+			return tpl.Execute(os.Stdout, data)
 		},
 	}
 
@@ -220,7 +247,17 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return err
 			}
 
-			return ctx.printBlocksSummaryText(blocks, true, kinds)
+			tpl, err := template.New("operation").Funcs(ctx.templateFuncMap).Parse(operationsTemplateSrc)
+			if err != nil {
+				return err
+			}
+
+			var data []*opInfo
+			for _, b := range blocks {
+				data = append(data, getBlockOperations(getBlockInfo(b), kinds)...)
+			}
+
+			return tpl.Execute(os.Stdout, data)
 		},
 	}
 
@@ -327,53 +364,9 @@ func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xb
 	return blocks, nil
 }
 
-func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock, getops bool, opsFilter map[string]struct{}) error {
-	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
-	if err != nil {
-		return err
-	}
-
-	type blockTplData struct {
-		*xblock
-		*blockInfo
-		OperationsInfo []*opInfo
-	}
-
-	tplData := make([]*blockTplData, len(blocks))
-
-	for i, b := range blocks {
-		tplData[i] = &blockTplData{
-			xblock:    b,
-			blockInfo: getBlockInfo(b.Block),
-		}
-
-		if getops {
-			tplData[i].OperationsInfo = getBlockOperations(b.Block, opsFilter)
-		}
-	}
-
-	return tpl.Execute(os.Stdout, tplData)
-}
-
-// brief block info suitable for the template rendering
-type opInfo struct {
-	Source      string
-	Kind        string
-	Title       string
-	Destination string
-	Amount      *big.Float
-	Fee         *big.Float
-	Hash        string
-}
-
-type blockInfo struct {
-	Volume        *big.Float
-	Fees          *big.Float
-	OperationsNum int
-}
-
-func getBlockInfo(b *tezos.Block) *blockInfo {
-	bi := blockInfo{
+func getBlockInfo(b *xblock) *xblockInfo {
+	bi := xblockInfo{
+		xblock: b,
 		Volume: big.NewFloat(0),
 		Fees:   big.NewFloat(0),
 	}
@@ -408,7 +401,7 @@ func getBlockInfo(b *tezos.Block) *blockInfo {
 	return &bi
 }
 
-func getBlockOperations(b *tezos.Block, opsFilter map[string]struct{}) (info []*opInfo) {
+func getBlockOperations(b *xblockInfo, opsFilter map[string]struct{}) (info []*opInfo) {
 	for _, ol := range b.Operations {
 		for _, o := range ol {
 			for _, c := range o.Contents {
@@ -421,6 +414,7 @@ func getBlockOperations(b *tezos.Block, opsFilter map[string]struct{}) (info []*
 					Kind:  c.OperationElemKind(),
 					Hash:  o.Hash,
 					Title: operationTitles[c.OperationElemKind()],
+					Block: b,
 				}
 
 				if el, ok := c.(tezos.OperationWithFee); ok {
