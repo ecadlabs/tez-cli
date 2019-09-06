@@ -22,7 +22,6 @@ package cmd
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -258,14 +257,21 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				}
 			}
 
-			// TODO JSON/YAML
-			if ctx.newEncoder != nil {
-				return errors.New("Not implemented")
-			}
-
 			blocks, err := ctx.getBlocks(args, true)
 			if err != nil {
 				return err
+			}
+
+			if ctx.newEncoder != nil {
+				enc := ctx.newEncoder(os.Stdout)
+
+				var data []*tezos.Operation
+				for _, b := range blocks {
+					ops := getRawBlockOperations(b.Block, kinds)
+					data = append(data, ops...)
+				}
+
+				return enc.Encode(data)
 			}
 
 			if ctx.userTemplate != nil {
@@ -514,6 +520,21 @@ func getBlockOperations(b *xblockInfo, opsFilter map[string]struct{}) (info []*o
 				}
 
 				info = append(info, oi)
+			}
+		}
+	}
+
+	return
+}
+
+func getRawBlockOperations(b *tezos.Block, opsFilter map[string]struct{}) (ops []*tezos.Operation) {
+	for _, ol := range b.Operations {
+		for _, o := range ol {
+			for _, c := range o.Contents {
+				if _, ok := opsFilter[c.OperationElemKind()]; ok || opsFilter == nil {
+					ops = append(ops, o)
+					break
+				}
 			}
 		}
 	}
