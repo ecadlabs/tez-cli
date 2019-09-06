@@ -117,6 +117,7 @@ type BlockCommandContext struct {
 	*RootContext
 	newEncoder      utils.NewEncoderFunc
 	templateFuncMap template.FuncMap
+	userTemplate    *template.Template
 }
 
 type xblock struct {
@@ -147,6 +148,7 @@ type xblockInfo struct {
 func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	var (
 		outputFormat string
+		userTemplate string
 		blockCmd     *cobra.Command // Forward declaration, see PersistentPreRunE below
 	)
 
@@ -173,6 +175,14 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 			ctx.newEncoder = utils.GetEncoderFunc(outputFormat)
 			ctx.templateFuncMap = template.FuncMap{"au": func() interface{} { return ctx.colorizer }}
 
+			if userTemplate != "" {
+				tpl, err := template.New("user").Funcs(ctx.templateFuncMap).Parse(userTemplate)
+				if err != nil {
+					return nil
+				}
+				ctx.userTemplate = tpl
+			}
+
 			return nil
 		},
 
@@ -191,6 +201,17 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return enc.Encode(blocks)
 			}
 
+			if ctx.userTemplate != nil {
+				for _, b := range blocks {
+					data := getBlockInfo(b)
+					if err := ctx.userTemplate.Execute(os.Stdout, data); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			// Standard template
 			tpl, err := template.New("block").Funcs(ctx.templateFuncMap).Parse(blockTemplateSrc)
 			if err != nil {
 				return err
@@ -247,6 +268,19 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return err
 			}
 
+			if ctx.userTemplate != nil {
+				for _, b := range blocks {
+					ops := getBlockOperations(getBlockInfo(b), kinds)
+					for _, op := range ops {
+						if err := ctx.userTemplate.Execute(os.Stdout, op); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}
+
+			// Standard template
 			tpl, err := template.New("operation").Funcs(ctx.templateFuncMap).Parse(operationsTemplateSrc)
 			if err != nil {
 				return err
@@ -265,6 +299,7 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	operationsCmd.Flags().StringSliceVarP(&opKinds, "kind", "k", nil, "Operation kinds: either comma separated list of [end[orsement], act[ivate_account], prop[osals], bal[lot], rev[eal], transaction|tx, orig[ination], del[egation], seed_nonce_revelation, double_endorsement_evidence, double_baking_evidence] or `all'")
 
 	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-encoding", "o", "text", "Output encoding: one of [text, yaml, json]")
+	blockCmd.PersistentFlags().StringVar(&userTemplate, "output-fmt", "", "Output format (Go template)")
 	blockCmd.AddCommand(headerCmd)
 	blockCmd.AddCommand(operationsCmd)
 
