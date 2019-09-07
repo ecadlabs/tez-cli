@@ -27,6 +27,7 @@ import (
 	"github.com/ecadlabs/go-tezos"
 	"github.com/logrusorgru/aurora"
 	"github.com/mattn/go-isatty"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
@@ -43,6 +44,7 @@ func NewRootCommand() *cobra.Command {
 	var (
 		useColors bool
 		ctx       RootContext
+		level     string
 	)
 
 	rootCmd := &cobra.Command{
@@ -56,15 +58,24 @@ func NewRootCommand() *cobra.Command {
 			if err != nil {
 				err = fmt.Errorf("Failed to initilize tezos RPC client: %v", err)
 			}
+
+			lv, err := log.ParseLevel(level)
+			if err != nil {
+				return err
+			}
+
+			log.SetLevel(lv)
+
 			return
 		},
 	}
 
 	f := rootCmd.PersistentFlags()
 
-	f.StringVar(&ctx.tezosURL, "url", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
+	f.StringVarP(&ctx.tezosURL, "url", "u", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
 	f.StringVar(&ctx.chainID, "chain", "main", "Chain ID")
 	f.BoolVar(&useColors, "colors", true, "Use colors")
+	f.StringVar(&level, "log", "info", "Log level: [error, warn, info, debug, trace]")
 
 	rootCmd.AddCommand(NewBlockCommand(&ctx))
 
