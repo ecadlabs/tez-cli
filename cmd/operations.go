@@ -21,15 +21,22 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"math/big"
 	"os"
 	"text/template"
 
-	"github.com/spf13/cobra"
-
 	tezos "github.com/ecadlabs/go-tezos"
+	"github.com/ecadlabs/tez/cmd/utils"
+	"github.com/spf13/cobra"
 )
+
+const operationsTemplateSrc = `   BLOCK TYPE         FROM                                 TO                                           AMOUNT            FEE HASH
+{{range . -}}
+{{printf "%8d" .Block.Header.Level}} {{or .Title .Kind | printf "%-12.12s"}} {{or .Source "--" | printf "%-36.36s"}} {{or .Destination "--" | printf "%-36.36s"}} {{if .Amount}}{{printf "%12.6f ꜩ" .Amount}}{{else}}            --{{end}} {{if .Fee}}{{printf "%12.6f ꜩ" .Fee}}{{else}}            --{{end}} {{.Hash}}
+{{end -}}
+`
 
 // brief block info suitable for the template rendering
 type opInfo struct {
@@ -68,33 +75,9 @@ func newBlockOperationsCommand(ctx *BlockCommandContext) *cobra.Command {
 				}
 			}
 
-			blocks, err := ctx.getBlocks(args, true)
-			if err != nil {
-				return err
-			}
-
+			var enc utils.Encoder
 			if ctx.newEncoder != nil {
-				enc := ctx.newEncoder(os.Stdout)
-
-				var data []*tezos.Operation
-				for _, b := range blocks {
-					ops := getRawBlockOperations(b.Block, kinds)
-					data = append(data, ops...)
-				}
-
-				return enc.Encode(data)
-			}
-
-			if ctx.userTemplate != nil {
-				for _, b := range blocks {
-					ops := getBlockOperations(getBlockInfo(b), kinds)
-					for _, op := range ops {
-						if err := ctx.userTemplate.Execute(os.Stdout, op); err != nil {
-							return err
-						}
-					}
-				}
-				return nil
+				enc = ctx.newEncoder(os.Stdout)
 			}
 
 			// Standard template
@@ -103,12 +86,113 @@ func newBlockOperationsCommand(ctx *BlockCommandContext) *cobra.Command {
 				return err
 			}
 
-			var data []*opInfo
-			for _, b := range blocks {
-				data = append(data, getBlockOperations(getBlockInfo(b), kinds)...)
+			if ctx.watch {
+				var monErr error
+				ch := make(chan *tezos.BlockInfo, 10)
+				go func() {
+					monErr = ctx.monitorHeads(ch)
+					close(ch)
+				}()
+
+				var (
+					tplErr error
+					tplCh  chan *opInfo
+					tplSem chan struct{}
+				)
+
+				if enc == nil && ctx.userTemplate == nil {
+					tplCh = make(chan *opInfo, 100)
+					tplSem = make(chan struct{})
+
+					// Run template engine in background
+					go func() {
+						tplErr = tpl.Execute(os.Stdout, tplCh)
+						close(tplSem)
+					}()
+				}
+
+				for bi := range ch {
+					block, err := ctx.getBlock(bi.Hash, false)
+					if err != nil {
+						if err != context.Canceled {
+							return err
+						}
+						return nil
+					}
+
+					if enc != nil {
+						ops := getRawBlockOperations(block.Block, kinds)
+						if err := enc.Encode(ops); err != nil {
+							return err
+						}
+						continue
+					}
+
+					ops := getBlockOperations(getBlockInfo(block), kinds)
+					if ctx.userTemplate != nil {
+						for _, op := range ops {
+							if err := ctx.userTemplate.Execute(os.Stdout, op); err != nil {
+								return err
+							}
+						}
+						continue
+					}
+
+					// Send to the template
+					for _, op := range ops {
+						tplCh <- op
+					}
+				}
+
+				if tplCh != nil {
+					close(tplCh)
+					<-tplSem
+					if tplErr != nil {
+						return tplErr
+					}
+				}
+
+				if monErr != nil && monErr != context.Canceled {
+					return monErr
+				}
+				return nil
 			}
 
-			return tpl.Execute(os.Stdout, data)
+			// Get all at once
+			blocks := make([]*xblock, len(args))
+			for i, blockID := range args {
+				block, err := ctx.getBlock(blockID, enc == nil)
+				if err != nil {
+					return err
+				}
+				blocks[i] = block
+			}
+
+			if enc != nil {
+				var data []*tezos.Operation
+				for _, b := range blocks {
+					ops := getRawBlockOperations(b.Block, kinds)
+					data = append(data, ops...)
+				}
+				return enc.Encode(data)
+			}
+
+			var info []*opInfo
+			for _, b := range blocks {
+				info = append(info, getBlockOperations(getBlockInfo(b), kinds)...)
+			}
+
+			if ctx.userTemplate != nil {
+				for _, op := range info {
+					if err := ctx.userTemplate.Execute(os.Stdout, op); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			// Standard template expects a slice or a channel
+			return tpl.Execute(os.Stdout, info)
 		},
 	}
 

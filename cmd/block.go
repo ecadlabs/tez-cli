@@ -27,14 +27,12 @@ import (
 	"strconv"
 	"text/template"
 
-	"github.com/spf13/cobra"
-
 	tezos "github.com/ecadlabs/go-tezos"
 	"github.com/ecadlabs/tez/cmd/utils"
+	"github.com/spf13/cobra"
 )
 
-const (
-	blockTemplateSrc = `{{range . -}}
+const blockTemplateSrc = `{{range . -}}
 Block:        {{.Hash | au.BgGreen}}
 Predecessor:  {{.Header.Predecessor | au.Blue}}
 Successor:    {{with .Successor}}{{.Hash}}{{else}}--{{end}}
@@ -51,13 +49,6 @@ Operations:   {{.OperationsNum}}
 
 {{end -}}
 `
-
-	operationsTemplateSrc = `   Block Type         From                                 To                                           Amount            Fee Hash
-{{range . -}}
-{{printf "%8d" .Block.Header.Level}} {{or .Title .Kind | printf "%-12.12s"}} {{or .Source "--" | printf "%-36.36s"}} {{or .Destination "--" | printf "%-36.36s"}} {{if .Amount}}{{printf "%12.6f ꜩ" .Amount}}{{else}}            --{{end}} {{if .Fee}}{{printf "%12.6f ꜩ" .Fee}}{{else}}            --{{end}} {{.Hash}}
-{{end -}}
-`
-)
 
 const (
 	opEndorsement               = "endorsement"
@@ -116,11 +107,12 @@ type BlockCommandContext struct {
 	newEncoder      utils.NewEncoderFunc
 	templateFuncMap template.FuncMap
 	userTemplate    *template.Template
+	watch           bool
 }
 
 type xblock struct {
-	*tezos.Block
-	Successor *tezos.Block `json:"-" yaml:"-"`
+	*tezos.Block `yaml:",inline"`
+	Successor    *tezos.Block `json:"-" yaml:"-"`
 }
 
 type xblockInfo struct {
@@ -177,24 +169,9 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				args = []string{"head"}
 			}
 
-			blocks, err := ctx.getBlocks(args, ctx.newEncoder == nil)
-			if err != nil {
-				return err
-			}
-
+			var enc utils.Encoder
 			if ctx.newEncoder != nil {
-				enc := ctx.newEncoder(os.Stdout)
-				return enc.Encode(blocks)
-			}
-
-			if ctx.userTemplate != nil {
-				for _, b := range blocks {
-					data := getBlockInfo(b)
-					if err := ctx.userTemplate.Execute(os.Stdout, data); err != nil {
-						return err
-					}
-				}
-				return nil
+				enc = ctx.newEncoder(os.Stdout)
 			}
 
 			// Standard template
@@ -203,13 +180,103 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				return err
 			}
 
-			data := make([]*xblockInfo, len(blocks))
+			if ctx.watch {
+				var monErr error
+				ch := make(chan *tezos.BlockInfo, 10)
+				go func() {
+					monErr = ctx.monitorHeads(ch)
+					close(ch)
+				}()
 
-			for i, b := range blocks {
-				data[i] = getBlockInfo(b)
+				var (
+					tplErr error
+					tplCh  chan *xblockInfo
+					tplSem chan struct{}
+				)
+
+				if enc == nil && ctx.userTemplate == nil {
+					tplCh = make(chan *xblockInfo, 10)
+					tplSem = make(chan struct{})
+
+					// Run template engine in background
+					go func() {
+						tplErr = tpl.Execute(os.Stdout, tplCh)
+						close(tplSem)
+					}()
+				}
+
+				for bi := range ch {
+					block, err := ctx.getBlock(bi.Hash, false)
+					if err != nil {
+						if err != context.Canceled {
+							return err
+						}
+						return nil
+					}
+
+					if enc != nil {
+						if err := enc.Encode(block); err != nil {
+							return err
+						}
+						continue
+					}
+
+					info := getBlockInfo(block)
+					if ctx.userTemplate != nil {
+						if err := ctx.userTemplate.Execute(os.Stdout, info); err != nil {
+							return err
+						}
+						continue
+					}
+					// Send to the template
+					tplCh <- info
+				}
+
+				if tplCh != nil {
+					close(tplCh)
+					<-tplSem
+					if tplErr != nil {
+						return tplErr
+					}
+				}
+
+				if monErr != nil && monErr != context.Canceled {
+					return monErr
+				}
+				return nil
 			}
 
-			return tpl.Execute(os.Stdout, data)
+			// Get all at once
+			blocks := make([]*xblock, len(args))
+			for i, blockID := range args {
+				block, err := ctx.getBlock(blockID, enc == nil)
+				if err != nil {
+					return err
+				}
+				blocks[i] = block
+			}
+
+			if enc != nil {
+				// Encode as a slice
+				return enc.Encode(blocks)
+			}
+
+			info := make([]*xblockInfo, len(blocks))
+			for i, b := range blocks {
+				info[i] = getBlockInfo(b)
+			}
+
+			if ctx.userTemplate != nil {
+				for _, bi := range info {
+					if err := ctx.userTemplate.Execute(os.Stdout, bi); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			// Standard template expects a slice or a channel
+			return tpl.Execute(os.Stdout, info)
 		},
 	}
 
@@ -222,6 +289,7 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 
 	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-encoding", "o", "text", "Output encoding: one of [text, yaml, json]")
 	blockCmd.PersistentFlags().StringVar(&userTemplate, "output-fmt", "", "Output format (Go template)")
+	blockCmd.PersistentFlags().BoolVar(&ctx.watch, "watch", false, "Ignore provided IDs and watch for new head blocks in a chain")
 	blockCmd.AddCommand(headerCmd)
 
 	blockCmd.AddCommand(newBlockOperationsCommand(&ctx))
@@ -260,8 +328,6 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 		offset *= sign
 	}
 
-	s := &tezos.Service{Client: c.tezosClient}
-
 	var (
 		block *tezos.Block
 		err   error
@@ -278,19 +344,19 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 			level = int(v)
 		}
 
-		block, err = s.GetBlock(context.TODO(), c.chainID, strconv.FormatInt(int64(level+offset), 10))
+		block, err = c.service.GetBlock(c.context, c.chainID, strconv.FormatInt(int64(level+offset), 10))
 		if err != nil {
 			return nil, err
 		}
 	} else {
 		// traverse
-		block, err = s.GetBlock(context.TODO(), c.chainID, id)
+		block, err = c.service.GetBlock(c.context, c.chainID, id)
 		if err != nil {
 			return nil, err
 		}
 
 		if offset != 0 {
-			block, err = s.GetBlock(context.TODO(), c.chainID, strconv.FormatInt(int64(block.Header.Level+offset), 10))
+			block, err = c.service.GetBlock(c.context, c.chainID, strconv.FormatInt(int64(block.Header.Level+offset), 10))
 			if err != nil {
 				return nil, err
 			}
@@ -302,24 +368,18 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 	}
 
 	if getSuccessor {
-		xb.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+		xb.Successor, _ = c.service.GetBlock(c.context, c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
 	}
 
 	return &xb, nil
 }
 
-func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xblock, error) {
-	blocks := make([]*xblock, len(ids))
-
-	for i, id := range ids {
-		var err error
-		blocks[i], err = c.getBlock(id, getSuccessors)
-		if err != nil {
-			return nil, err
-		}
+func (c *BlockCommandContext) monitorHeads(results chan<- *tezos.BlockInfo) (err error) {
+	// Some endpoints closes connection
+	for err == nil {
+		err = c.service.MonitorHeads(c.context, c.chainID, results)
 	}
-
-	return blocks, nil
+	return
 }
 
 func getBlockInfo(b *xblock) *xblockInfo {
