@@ -111,7 +111,17 @@ func newBlockOperationsCommand(ctx *BlockCommandContext) *cobra.Command {
 					}()
 				}
 
+				var (
+					lastLevel          int
+					firstBlockReceived bool
+				)
 				for bi := range ch {
+					if firstBlockReceived && bi.Level <= lastLevel {
+						continue
+					}
+					firstBlockReceived = true
+					lastLevel = bi.Level
+
 					block, err := ctx.getBlock(bi.Hash, false)
 					if err != nil {
 						if err != context.Canceled {
