@@ -22,20 +22,17 @@ package cmd
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"math/big"
 	"os"
 	"strconv"
 	"text/template"
 
-	"github.com/spf13/cobra"
-
 	tezos "github.com/ecadlabs/go-tezos"
 	"github.com/ecadlabs/tez/cmd/utils"
+	"github.com/spf13/cobra"
 )
 
-const blockTplText = `{{range . -}}
+const blockTemplateSrc = `{{range . -}}
 Block:        {{.Hash | au.BgGreen}}
 Predecessor:  {{.Header.Predecessor | au.Blue}}
 Successor:    {{with .Successor}}{{.Hash}}{{else}}--{{end}}
@@ -50,17 +47,6 @@ Volume:       {{printf "%.6f ꜩ" .Volume | au.Green}}
 Fees:         {{printf "%.6f ꜩ" .Fees}}
 Operations:   {{.OperationsNum}}
 
-{{with .OperationsInfo -}}
-{{range . -}}
-Type:   {{or .Title .Kind}}
-From:   {{or .Source "--"}}
-To:     {{or .Destination "--"}}
-Amount: {{if .Amount}}{{printf "%.6f ꜩ" .Amount}}{{else}}--{{end}}
-Fee:    {{if .Fee}}{{printf "%.6f ꜩ" .Fee}}{{else}}--{{end}}
-Hash:   {{.Hash}}
-
-{{end -}}
-{{end -}}
 {{end -}}
 `
 
@@ -120,17 +106,27 @@ type BlockCommandContext struct {
 	*RootContext
 	newEncoder      utils.NewEncoderFunc
 	templateFuncMap template.FuncMap
+	userTemplate    *template.Template
+	watch           bool
 }
 
 type xblock struct {
-	*tezos.Block
-	Successor *tezos.Block `json:"-" yaml:"-"`
+	*tezos.Block `yaml:",inline"`
+	Successor    *tezos.Block `json:"-" yaml:"-"`
+}
+
+type xblockInfo struct {
+	*xblock
+	Volume        *big.Float
+	Fees          *big.Float
+	OperationsNum int
 }
 
 // NewBlockCommand returns new `block' command
 func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 	var (
 		outputFormat string
+		userTemplate string
 		blockCmd     *cobra.Command // Forward declaration, see PersistentPreRunE below
 	)
 
@@ -157,6 +153,14 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 			ctx.newEncoder = utils.GetEncoderFunc(outputFormat)
 			ctx.templateFuncMap = template.FuncMap{"au": func() interface{} { return ctx.colorizer }}
 
+			if userTemplate != "" {
+				tpl, err := template.New("user").Funcs(ctx.templateFuncMap).Parse(userTemplate)
+				if err != nil {
+					return nil
+				}
+				ctx.userTemplate = tpl
+			}
+
 			return nil
 		},
 
@@ -165,17 +169,124 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 				args = []string{"head"}
 			}
 
-			blocks, err := ctx.getBlocks(args, ctx.newEncoder == nil)
+			var enc utils.Encoder
+			if ctx.newEncoder != nil {
+				enc = ctx.newEncoder(os.Stdout)
+			}
+
+			// Standard template
+			tpl, err := template.New("block").Funcs(ctx.templateFuncMap).Parse(blockTemplateSrc)
 			if err != nil {
 				return err
 			}
 
-			if ctx.newEncoder != nil {
-				enc := ctx.newEncoder(os.Stdout)
+			if ctx.watch {
+				var monErr error
+				ch := make(chan *tezos.BlockInfo, 10)
+				go func() {
+					monErr = ctx.monitorHeads(ch)
+					close(ch)
+				}()
+
+				var (
+					tplErr error
+					tplCh  chan *xblockInfo
+					tplSem chan struct{}
+				)
+
+				if enc == nil && ctx.userTemplate == nil {
+					tplCh = make(chan *xblockInfo, 10)
+					tplSem = make(chan struct{})
+
+					// Run template engine in background
+					go func() {
+						tplErr = tpl.Execute(os.Stdout, tplCh)
+						close(tplSem)
+					}()
+				}
+
+				var (
+					lastLevel          int
+					firstBlockReceived bool
+				)
+				for bi := range ch {
+					if firstBlockReceived && bi.Level <= lastLevel {
+						continue
+					}
+					firstBlockReceived = true
+					lastLevel = bi.Level
+
+					block, err := ctx.getBlock(bi.Hash, false)
+					if err != nil {
+						if err != context.Canceled {
+							return err
+						}
+						return nil
+					}
+
+					if enc != nil {
+						if err := enc.Encode(block); err != nil {
+							return err
+						}
+						continue
+					}
+
+					info := getBlockInfo(block)
+					if ctx.userTemplate != nil {
+						if err := ctx.userTemplate.Execute(os.Stdout, info); err != nil {
+							return err
+						}
+						continue
+					}
+					// Send to the template
+					tplCh <- info
+				}
+
+				if tplCh != nil {
+					close(tplCh)
+					<-tplSem
+					if tplErr != nil {
+						return tplErr
+					}
+				}
+
+				if monErr != nil && monErr != context.Canceled {
+					return monErr
+				}
+				return nil
+			}
+
+			// Get all at once
+			blocks := make([]*xblock, len(args))
+			for i, blockID := range args {
+				block, err := ctx.getBlock(blockID, enc == nil)
+				if err != nil {
+					return err
+				}
+				blocks[i] = block
+			}
+
+			if enc != nil {
+				// Encode as a slice
 				return enc.Encode(blocks)
 			}
 
-			return ctx.printBlocksSummaryText(blocks, false, nil)
+			info := make([]*xblockInfo, len(blocks))
+			for i, b := range blocks {
+				info[i] = getBlockInfo(b)
+			}
+
+			if ctx.userTemplate != nil {
+				for _, bi := range info {
+					if err := ctx.userTemplate.Execute(os.Stdout, bi); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			// Standard template expects a slice or a channel
+			return tpl.Execute(os.Stdout, info)
 		},
 	}
 
@@ -186,50 +297,12 @@ func NewBlockCommand(rootCtx *RootContext) *cobra.Command {
 		RunE:  blockCmd.RunE,
 	}
 
-	var opKinds []string
-
-	operationsCmd := &cobra.Command{
-		Use:     "operations",
-		Aliases: []string{"op"},
-		Short:   "Inspect block operations",
-
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				args = []string{"head"}
-			}
-
-			var kinds map[string]struct{}
-			if len(opKinds) != 0 {
-				kinds = make(map[string]struct{}, len(opKinds))
-				for _, kind := range opKinds {
-					if k, ok := knownKinds[kind]; ok {
-						kinds[k] = struct{}{}
-					} else {
-						return fmt.Errorf("Unknown operation kind: `%s'", k)
-					}
-				}
-			}
-
-			// TODO JSON/YAML
-			if ctx.newEncoder != nil {
-				return errors.New("Not implemented")
-			}
-
-			blocks, err := ctx.getBlocks(args, true)
-			if err != nil {
-				return err
-			}
-
-			return ctx.printBlocksSummaryText(blocks, true, kinds)
-		},
-	}
-
-	// TODO: other kinds
-	operationsCmd.Flags().StringSliceVarP(&opKinds, "kind", "k", nil, "Operation kinds: either comma separated list of [end[orsement], act[ivate_account], prop[osals], bal[lot], rev[eal], transaction|tx, orig[ination], del[egation], seed_nonce_revelation, double_endorsement_evidence, double_baking_evidence] or `all'")
-
 	blockCmd.PersistentFlags().StringVarP(&outputFormat, "output-encoding", "o", "text", "Output encoding: one of [text, yaml, json]")
+	blockCmd.PersistentFlags().StringVar(&userTemplate, "output-fmt", "", "Output format (Go template)")
+	blockCmd.PersistentFlags().BoolVar(&ctx.watch, "watch", false, "Ignore provided IDs and watch for new head blocks in a chain")
 	blockCmd.AddCommand(headerCmd)
-	blockCmd.AddCommand(operationsCmd)
+
+	blockCmd.AddCommand(newBlockOperationsCommand(&ctx))
 
 	return blockCmd
 }
@@ -265,8 +338,6 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 		offset *= sign
 	}
 
-	s := &tezos.Service{Client: c.tezosClient}
-
 	var (
 		block *tezos.Block
 		err   error
@@ -283,19 +354,19 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 			level = int(v)
 		}
 
-		block, err = s.GetBlock(context.TODO(), c.chainID, strconv.FormatInt(int64(level+offset), 10))
+		block, err = c.service.GetBlock(c.context, c.chainID, strconv.FormatInt(int64(level+offset), 10))
 		if err != nil {
 			return nil, err
 		}
 	} else {
 		// traverse
-		block, err = s.GetBlock(context.TODO(), c.chainID, id)
+		block, err = c.service.GetBlock(c.context, c.chainID, id)
 		if err != nil {
 			return nil, err
 		}
 
 		if offset != 0 {
-			block, err = s.GetBlock(context.TODO(), c.chainID, strconv.FormatInt(int64(block.Header.Level+offset), 10))
+			block, err = c.service.GetBlock(c.context, c.chainID, strconv.FormatInt(int64(block.Header.Level+offset), 10))
 			if err != nil {
 				return nil, err
 			}
@@ -307,73 +378,23 @@ func (c *BlockCommandContext) getBlock(query string, getSuccessor bool) (*xblock
 	}
 
 	if getSuccessor {
-		xb.Successor, _ = s.GetBlock(context.TODO(), c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
+		xb.Successor, _ = c.service.GetBlock(c.context, c.chainID, strconv.Itoa(int(block.Header.Level)+1)) // Just ignore an error
 	}
 
 	return &xb, nil
 }
 
-func (c *BlockCommandContext) getBlocks(ids []string, getSuccessors bool) ([]*xblock, error) {
-	blocks := make([]*xblock, len(ids))
-
-	for i, id := range ids {
-		var err error
-		blocks[i], err = c.getBlock(id, getSuccessors)
-		if err != nil {
-			return nil, err
-		}
+func (c *BlockCommandContext) monitorHeads(results chan<- *tezos.BlockInfo) (err error) {
+	// Some endpoints closes connection
+	for err == nil {
+		err = c.service.MonitorHeads(c.context, c.chainID, results)
 	}
-
-	return blocks, nil
+	return
 }
 
-func (c *BlockCommandContext) printBlocksSummaryText(blocks []*xblock, getops bool, opsFilter map[string]struct{}) error {
-	tpl, err := template.New("block").Funcs(c.templateFuncMap).Parse(blockTplText)
-	if err != nil {
-		return err
-	}
-
-	type blockTplData struct {
-		*xblock
-		*blockInfo
-		OperationsInfo []*opInfo
-	}
-
-	tplData := make([]*blockTplData, len(blocks))
-
-	for i, b := range blocks {
-		tplData[i] = &blockTplData{
-			xblock:    b,
-			blockInfo: getBlockInfo(b.Block),
-		}
-
-		if getops {
-			tplData[i].OperationsInfo = getBlockOperations(b.Block, opsFilter)
-		}
-	}
-
-	return tpl.Execute(os.Stdout, tplData)
-}
-
-// brief block info suitable for the template rendering
-type opInfo struct {
-	Source      string
-	Kind        string
-	Title       string
-	Destination string
-	Amount      *big.Float
-	Fee         *big.Float
-	Hash        string
-}
-
-type blockInfo struct {
-	Volume        *big.Float
-	Fees          *big.Float
-	OperationsNum int
-}
-
-func getBlockInfo(b *tezos.Block) *blockInfo {
-	bi := blockInfo{
+func getBlockInfo(b *xblock) *xblockInfo {
+	bi := xblockInfo{
+		xblock: b,
 		Volume: big.NewFloat(0),
 		Fees:   big.NewFloat(0),
 	}
@@ -406,88 +427,4 @@ func getBlockInfo(b *tezos.Block) *blockInfo {
 	bi.Fees.Mul(bi.Fees, big.NewFloat(1e-6))
 
 	return &bi
-}
-
-func getBlockOperations(b *tezos.Block, opsFilter map[string]struct{}) (info []*opInfo) {
-	for _, ol := range b.Operations {
-		for _, o := range ol {
-			for _, c := range o.Contents {
-				if _, ok := opsFilter[c.OperationElemKind()]; !ok && opsFilter != nil {
-					// Skip
-					continue
-				}
-
-				oi := &opInfo{
-					Kind:  c.OperationElemKind(),
-					Hash:  o.Hash,
-					Title: operationTitles[c.OperationElemKind()],
-				}
-
-				if el, ok := c.(tezos.OperationWithFee); ok {
-					if f := el.OperationFee(); f != nil {
-						oi.Fee = big.NewFloat(0)
-						oi.Fee.SetInt(f)
-						oi.Fee.Mul(oi.Fee, big.NewFloat(1e-6))
-					}
-				}
-
-				switch el := c.(type) {
-				case *tezos.EndorsementOperationElem:
-					oi.Source = el.Metadata.Delegate
-
-				case *tezos.TransactionOperationElem:
-					oi.Source = el.Source
-					oi.Destination = el.Destination
-					if el.Amount != nil {
-						oi.Amount = big.NewFloat(0)
-						oi.Amount.SetInt(&el.Amount.Int)
-						oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
-					}
-
-				case *tezos.BallotOperationElem:
-					oi.Source = el.Source
-
-				case *tezos.ProposalOperationElem:
-					oi.Source = el.Source
-
-				case *tezos.ActivateAccountOperationElem:
-					oi.Source = el.PKH
-					oi.Amount = big.NewFloat(0)
-					for _, b := range el.Metadata.BalanceUpdates {
-						if bu, ok := b.(*tezos.ContractBalanceUpdate); ok {
-							var amount big.Float
-							amount.SetInt64(int64(bu.Change))
-							oi.Amount.Add(oi.Amount, &amount)
-						}
-					}
-					oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
-
-				case *tezos.RevealOperationElem:
-					oi.Source = el.Source
-
-				case *tezos.OriginationOperationElem:
-					oi.Source = el.Source
-					oi.Destination = el.Delegate
-					if el.Balance != nil {
-						oi.Amount = big.NewFloat(0)
-						oi.Amount.SetInt(&el.Balance.Int)
-						oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
-					}
-
-				case *tezos.DelegationOperationElem:
-					oi.Source = el.Source
-					oi.Destination = el.Delegate
-					if el.Balance != nil {
-						oi.Amount = big.NewFloat(0)
-						oi.Amount.SetInt(&el.Balance.Int)
-						oi.Amount.Mul(oi.Amount, big.NewFloat(1e-6))
-					}
-				}
-
-				info = append(info, oi)
-			}
-		}
-	}
-
-	return
 }

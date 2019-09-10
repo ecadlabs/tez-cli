@@ -21,29 +21,36 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/ecadlabs/go-tezos"
 	"github.com/logrusorgru/aurora"
 	"github.com/mattn/go-isatty"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
 
 // RootContext represents root command context shared with its children
 type RootContext struct {
-	tezosURL    string
-	chainID     string
-	tezosClient *tezos.RPCClient
-	colorizer   aurora.Aurora
+	tezosURL  string
+	chainID   string
+	service   *tezos.Service
+	colorizer aurora.Aurora
+	context   context.Context
 }
 
 // NewRootCommand returns new root command
-func NewRootCommand() *cobra.Command {
+func NewRootCommand(ctx context.Context) *cobra.Command {
 	var (
 		useColors bool
-		ctx       RootContext
+		level     string
 	)
+
+	c := RootContext{
+		context: ctx,
+	}
 
 	rootCmd := &cobra.Command{
 		Use:   "tez",
@@ -51,27 +58,38 @@ func NewRootCommand() *cobra.Command {
 		Long:  `This utility allows you to inspect and manipulate a running Tezos instance`,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) (err error) {
 			// cmd always points to the top level command!!!
-			ctx.colorizer = aurora.NewAurora(useColors && isatty.IsTerminal(os.Stdout.Fd()))
-			ctx.tezosClient, err = tezos.NewRPCClient(nil, ctx.tezosURL)
+			c.colorizer = aurora.NewAurora(useColors && isatty.IsTerminal(os.Stdout.Fd()))
+			client, err := tezos.NewRPCClient(nil, c.tezosURL)
 			if err != nil {
 				err = fmt.Errorf("Failed to initilize tezos RPC client: %v", err)
 			}
+
+			c.service = &tezos.Service{Client: client}
+
+			lv, err := log.ParseLevel(level)
+			if err != nil {
+				return err
+			}
+
+			log.SetLevel(lv)
+
 			return
 		},
 	}
 
 	f := rootCmd.PersistentFlags()
 
-	f.StringVar(&ctx.tezosURL, "url", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
-	f.StringVar(&ctx.chainID, "chain", "main", "Chain ID")
+	f.StringVarP(&c.tezosURL, "url", "u", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
+	f.StringVar(&c.chainID, "chain", "main", "Chain ID")
 	f.BoolVar(&useColors, "colors", true, "Use colors")
+	f.StringVar(&level, "log", "info", "Log level: [error, warn, info, debug, trace]")
 
-	rootCmd.AddCommand(NewBlockCommand(&ctx))
+	rootCmd.AddCommand(NewBlockCommand(&c))
 
 	return rootCmd
 }
 
 // Execute executes root command
-func Execute() error {
-	return NewRootCommand().Execute()
+func Execute(ctx context.Context) error {
+	return NewRootCommand(ctx).Execute()
 }

@@ -21,14 +21,28 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/ecadlabs/tez/cmd"
+	log "github.com/sirupsen/logrus"
 )
 
 func main() {
-	if err := cmd.Execute(); err != nil {
-		//fmt.Println(err)
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	go func() {
+		s := <-signalChan
+		log.Printf("Captured %v. Exiting...\n", s)
+		cancel()
+	}()
+
+	if err := cmd.Execute(ctx); err != nil {
 		os.Exit(1)
 	}
 }
