@@ -79,7 +79,7 @@ func NewRootCommand(ctx context.Context) *cobra.Command {
 
 	f := rootCmd.PersistentFlags()
 
-	f.StringVarP(&c.tezosURL, "url", "u", "https://rpc.tezrpc.me/", "Tezos RPC end-point URL")
+	f.StringVarP(&c.tezosURL, "url", "u", "https://api.tez.ie/", "Tezos RPC end-point URL")
 	f.StringVar(&c.chainID, "chain", "main", "Chain ID")
 	f.BoolVar(&useColors, "colors", true, "Use colors")
 	f.StringVar(&level, "log", "info", "Log level: [error, warn, info, debug, trace]")
