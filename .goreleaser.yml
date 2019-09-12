@@ -27,6 +27,20 @@ checksum:
   name_template: 'checksums.txt'
 snapshot:
   name_template: "{{ .Tag }}-next"
+
+signs:
+  -
+    signature: "${artifact}.sig"
+    artifacts: all
+    cmd: keybase
+    args:
+    - sign
+    - --infile
+    - $artifact
+    - --binary
+    - --outfile
+    - $signature
+    - --detached
 changelog:
   sort: asc
   filters:
